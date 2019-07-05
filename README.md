@@ -1,9 +1,9 @@
 # yet-another-poisfac
 pytorch implementation of poisson factorization
 
-## Setup
+## Model and purposes
 
-This package build a model for a count matrix `X`.  The model family is:
+This python3 package build a model for a count matrix `X`.  The model family is:
 
 ```
 U_{ck} ~ Gamma(rho,kappa_c)
@@ -21,6 +21,10 @@ Z_{ctk} ~ Multinomial( varphi_{ctk}, X_{ct})
 ```
 
 Note that the variational parameters for Z are never held in memory (too big!).  So, for example, to perform an update for `U_{ck}` we use the current parameters to calculate the optimal variational parameters for `varphi_{ctk}` for all `t`,`k` (in fact only necessary for `t`,`k` where `X_{ct}` is nonzero) and then use that to get an update for `U_{ckl}`.  
+
+## Installation
+
+Dependencies are:`scipy`,`sklearn`,`torch`,`tqdm`.  Just git clone this into your working directory and import it.  If you really want to install this package you're probably doing it wrong.  This code is just a singly pure-python file.  By the time you find you want to install this as a package, you should probably just copy and paste my code into whatever else you're doing.  Chances are you'll want to tweak it to your purposes anyway.
 
 ## Usage:
 

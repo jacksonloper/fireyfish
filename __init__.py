@@ -116,26 +116,30 @@ class Trainer:
     def __init__(self,model):
         self.model=model
         self.elbos=[]
+        self.elbos.append(self.model.ELBO(verbose=False))
         self.KEEPGOING=False
+
+    def _eupdate(self):
+        self.elbos.append(self.model.ELBO(verbose=False))
+        return self.elbos[-1].total >= self.elbos[0].total
 
     def go(self,niter,U=True,alpha=True,kappalams=True):
         self.KEEPGOING=True
-        self.elbos.append(self.model.ELBO(verbose=False))
         t=tqdm.tqdm_notebook(range(niter))
         for i in t:
             if U:
                 self.model.update_U(verbose=False)
-                self.elbos.append(self.model.ELBO(verbose=False))
+                assert self._eupdate()
                 t.set_description("%e"%self.elbos[-1].loss)
             
             if alpha:
                 self.model.update_alpha(verbose=False)
-                self.elbos.append(self.model.ELBO(verbose=False))
+                assert self._eupdate()
                 t.set_description("%e"%self.elbos[-1].loss) 
         
             if kappalams:
                 self.model.update_kappas_and_lambdas()
-                self.elbos.append(self.model.ELBO(verbose=False))
+                assert self._eupdate()
                 t.set_description("%e"%self.elbos[-1].loss) 
 
             if not self.KEEPGOING:

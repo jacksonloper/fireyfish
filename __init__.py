@@ -118,19 +118,26 @@ class Trainer:
         self.elbos=[]
         self.KEEPGOING=False
 
-    def go(self,niter):
+    def go(self,niter,U=True,alpha=True,kappalams=True):
         self.KEEPGOING=True
         self.elbos.append(self.model.ELBO(verbose=False))
         t=tqdm.tqdm_notebook(range(niter))
         for i in t:
-            self.model.update_U(verbose=False)
-            self.elbos.append(self.model.ELBO(verbose=False))
-            t.set_description("%e"%self.elbos[-1].loss)
+            if U:
+                self.model.update_U(verbose=False)
+                self.elbos.append(self.model.ELBO(verbose=False))
+                t.set_description("%e"%self.elbos[-1].loss)
             
-            self.model.update_alpha(verbose=False)
-            self.elbos.append(self.model.ELBO(verbose=False))
-            t.set_description("%e"%self.elbos[-1].loss) 
+            if alpha:
+                self.model.update_alpha(verbose=False)
+                self.elbos.append(self.model.ELBO(verbose=False))
+                t.set_description("%e"%self.elbos[-1].loss) 
         
+            if kappalams:
+                self.model.update_kappas_and_lambdas()
+                self.elbos.append(self.model.ELBO(verbose=False))
+                t.set_description("%e"%self.elbos[-1].loss) 
+
             if not self.KEEPGOING:
                 return
         
@@ -154,6 +161,16 @@ class PoisModel:
         self.cells=torch.tensor(coo.row,dtype=torch.long)
         self.genes=torch.tensor(coo.col,dtype=torch.long)
         self.vals=torch.tensor(coo.data,dtype=self.dtype)
+
+    def reinitialize_Us(self):
+        mn = len(self.cells) / (self.Nc*self.salpha.shape[1])
+        avg = np.sqrt(mn / self.salpha.shape[1])
+
+        self.sU=torch.full((self.Nc,self.Nk),float(avg),device=self.salpha.device,dtype=self.dtype)
+        self.rU=torch.ones((self.Nc,self.Nk),device=self.salpha.device,dtype=self.dtype)
+        
+        self.update_uai()
+        self.update_kappas_and_lambdas()
 
     def update_uai(self):
         EU = self.sU/self.rU
@@ -179,6 +196,7 @@ class PoisModel:
         self.update_uai()
 
     def double(self):
+        self.dtype=torch.double
         for x in ['kappas','lambdas','sU','rU','salpha','ralpha','rho','vals']:
             setattr(self,x,getattr(self,x).double())
         self.update_uai()

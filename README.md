@@ -35,7 +35,7 @@ model=fireyfish.PoisModel(countmatrix,Nfactors,batchsize=100000,rho=1)
 model.initialize()
 model.double() # (optionally) do it in double precision
 model.cuda()   # (optionally) do it on the GPU
-trainer=Trainer(model)
+trainer=fireyfish.Trainer(model)
 trainer.go(500) # train for 500 iterations
 parameters= model.save_params(parms)
 ```
@@ -62,7 +62,7 @@ import matplotlib as plt
 plt.plot(elbos)
 ```
 
-Thie code seems to generally be fairly threadsafe, insofar as you can launch trainer.go in a separate thread and run `plt.plot([x.total for x in trainer.elbos])` from time to time to check progress.  A nice pattern for jupyter notebooks is to use IPython.lib.jobs.  
+Getting these metrics is a threadsafe affair; you can launch trainer.go in a separate thread and run `plt.plot([x.total for x in trainer.elbos])` from time to time to check progress.  A nice pattern for jupyter notebooks is to use `IPython.lib.jobs` --
 
 ```
 if 'jobs' not in locals():

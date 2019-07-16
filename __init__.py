@@ -62,10 +62,10 @@ def accumulate_multiplier_batched(accumulator,cells,genes,vals,elogU,elogalpha,b
 
         accumulator.index_put_((cells2,),xi,accumulate=True)
 
-def accumulate_ELBO(cells,genes,vals,uai,sU,rU,salpha,ralpha,kappas,lambdas,rho,batchsize=500,verbose=True):
+def accumulate_ELBO(cells,genes,vals,uai,sU,rU,salpha,ralpha,kappas,lambdas,rhoU,rhoalpha,batchsize=500,verbose=True):
     # KLs
-    U_kls = torch.sum(gamma_kl(sU,rU,rho,kappas[:,None]))
-    alpha_kls = torch.sum(gamma_kl(salpha,ralpha,rho,lambdas[:,None]))
+    U_kls = torch.sum(gamma_kl(sU,rU,rhoU,kappas[:,None]))
+    alpha_kls = torch.sum(gamma_kl(salpha,ralpha,rhoalpha,lambdas[:,None]))
        
     # Z term
     ll=0
@@ -123,23 +123,32 @@ class Trainer:
         self.elbos.append(self.model.ELBO(verbose=False))
         return self.elbos[-1].total >= self.elbos[0].total
 
+    def stop(self):
+        self.KEEPGOING=False
+
     def go(self,niter,U=True,alpha=True,kappalams=True):
         self.KEEPGOING=True
         t=tqdm.tqdm_notebook(range(niter))
         for i in t:
             if U:
                 self.model.update_U(verbose=False)
-                assert self._eupdate()
+                if not self._eupdate():
+                    self.stop()
+                    return False
                 t.set_description("%e"%self.elbos[-1].loss)
             
             if alpha:
                 self.model.update_alpha(verbose=False)
-                assert self._eupdate()
+                if not self._eupdate():
+                    self.stop()
+                    return False
                 t.set_description("%e"%self.elbos[-1].loss) 
         
             if kappalams:
                 self.model.update_kappas_and_lambdas()
-                assert self._eupdate()
+                if not self._eupdate():
+                    self.stop()
+                    return False
                 t.set_description("%e"%self.elbos[-1].loss) 
 
             if not self.KEEPGOING:
@@ -147,7 +156,7 @@ class Trainer:
         
 
 class PoisModel:
-    def __init__(self,countmatrix,Nk,dtype='float',rho=1.0,batchsize=5000):
+    def __init__(self,countmatrix,Nk,dtype='float',rhoU=1.0,rhoalpha=1.0,batchsize=5000):
         self.Nk=Nk
         self.countmatrix=countmatrix
 
@@ -159,7 +168,8 @@ class PoisModel:
             self.dtype=torch.float
         else:
             self.dtype=torch.double
-        self.rho=torch.tensor(rho,dtype=self.dtype)
+        self.rhoU=torch.tensor(rhoU,dtype=self.dtype)
+        self.rhoalpha=torch.tensor(rhoalpha,dtype=self.dtype)
 
         coo=countmatrix.tocoo()
         self.cells=torch.tensor(coo.row,dtype=torch.long)
@@ -185,17 +195,17 @@ class PoisModel:
 
     def save_params(self):
         rez=types.SimpleNamespace()
-        for x in ['kappas','lambdas','sU','rU','salpha','ralpha','rho']:
+        for x in ['kappas','lambdas','sU','rU','salpha','ralpha','rhoU','rhoalpha']:
             setattr(rez,x,getattr(self,x).detach().cpu().numpy())
         return rez
 
     def load_params(self,rez,device='cpu'):
-        for x in ['kappas','lambdas','sU','rU','salpha','ralpha','rho']:
+        for x in ['kappas','lambdas','sU','rU','salpha','ralpha','rhoU','rhoalpha']:
             setattr(self,x,torch.tensor(getattr(rez,x),dtype=self.dtype,device=device))
         self.update_uai()
 
     def cuda(self):
-        for x in ['cells','genes','kappas','lambdas','sU','rU','salpha','ralpha','rho','vals']:
+        for x in ['cells','genes','kappas','lambdas','sU','rU','salpha','ralpha','rhoU','rhoalpha','vals']:
             setattr(self,x,getattr(self,x).cuda())
         self.update_uai()
 
@@ -207,26 +217,26 @@ class PoisModel:
 
     def ELBO(self,verbose=True):
         return accumulate_ELBO(self.cells,self.genes,self.vals,
-            self.uai,self.sU,self.rU,self.salpha,self.ralpha,self.kappas,self.lambdas,self.rho,
+            self.uai,self.sU,self.rU,self.salpha,self.ralpha,self.kappas,self.lambdas,self.rhoU,self.rhoalpha,
             batchsize=self.batchsize,verbose=verbose)
 
     def update_U(self,verbose=True):
         self.sU,self.rU=update_U(self.cells,self.genes,self.vals,self.uai,
             self.kappas,verbose=verbose,batchsize=self.batchsize,
-            rho=self.rho)
+            rho=self.rhoU)
         self.uai.EU = self.sU/self.rU
         self.uai.ELU = torch.digamma(self.sU)-torch.log(self.rU)        
 
     def update_alpha(self,verbose=True):
         self.salpha,self.ralpha=update_U(self.genes,self.cells,self.vals,self.uai.transpose(),
             self.lambdas,verbose=verbose,batchsize=self.batchsize,
-            rho=self.rho)
+            rho=self.rhoalpha)
         self.uai.Ealpha = self.salpha/self.ralpha
         self.uai.ELalpha = torch.digamma(self.salpha)-torch.log(self.ralpha)        
 
     def update_kappas_and_lambdas(self):
-        self.kappas = self.rho /torch.mean(self.uai.EU,1)
-        self.lambdas= self.rho /torch.mean(self.uai.Ealpha,1)
+        self.kappas = self.rhoU /torch.mean(self.uai.EU,1)
+        self.lambdas= self.rhoalpha /torch.mean(self.uai.Ealpha,1)
 
     def initialize_with_known_alpha(self,salpha,ralpha,device='cpu'):
         mn = len(self.cells) / (self.Nc*alpha.shape[1])

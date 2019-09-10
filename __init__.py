@@ -113,46 +113,101 @@ class UAlphaInfo:
         return UAlphaInfo(self.Ealpha,self.ELalpha,self.EU,self.ELU)
 
 class Trainer:
-    def __init__(self,model):
+    def __init__(self,model,testingdata=None,test_iters=10):
         self.model=model
         self.elbos=[]
         self.elbos.append(self.model.ELBO(verbose=False))
+
+        self.test_elbos=[]
+        self.test_elbo_iter_loc=[]
+        self.testingdata=testingdata
+        self.test_iters=test_iters
+        self.testcheck()
+
         self.KEEPGOING=False
 
-    def _eupdate(self):
+    def _eupdate(self,t):
         self.elbos.append(self.model.ELBO(verbose=False))
-        return self.elbos[-1].total >= self.elbos[0].total
+        t.set_description("%e"%self.elbos[-1].loss) 
+        if self.elbos[-1].total < self.elbos[0].total:
+            self.KEEPGOING=False
+            raise Exception("elbo went down!")
 
-    def stop(self):
-        self.KEEPGOING=False
+    def run_test(self,test_iters):
+        params=self.model.save_params()
+        test_model=PoisModel(self.testingdata,self.model.Nk,
+            batchsize=self.model.batchsize,
+            rhoU=self.model.rhoU.item(),
+            rhoalpha=self.model.rhoalpha.item())
+        test_model.initialize_with_known_alpha(params.salpha,params.ralpha)
+        test_model.double()
+        test_model.cuda()
 
-    def go(self,niter,U=True,alpha=True,kappalams=True):
+        for i in range(self.test_iters):
+            test_model.update_U(verbose=False)
+            test_model.update_kappas()
+
+        return test_model
+
+    def run_train_scratch(self,test_iters):
+        params=self.model.save_params()
+        train_scratch_model=PoisModel(self.model.countmatrix,self.model.Nk,
+            batchsize=self.model.batchsize,
+            rhoU=self.model.rhoU.item(),
+            rhoalpha=self.model.rhoalpha.item())
+        train_scratch_model.initialize_with_known_alpha(params.salpha,params.ralpha)
+        train_scratch_model.double()
+        train_scratch_model.cuda()
+
+        for i in range(self.test_iters):
+            train_scratch_model.update_U(verbose=False)
+            test_model.update_kappas()
+
+        return train_scratch_model
+
+    def testcheck(self,test_iters=None):
+        if self.testingdata is not None:
+            # get data
+            self.test_model=self.run_test(self.test_iters)
+
+            # get elbo, correcting for the fact that we 
+            # have different number of cells our two datasets:
+            rez=self.test_model.ELBO()
+            ntrain=self.model.countmatrix.shape[0]
+            ntest=self.test_model.countmatrix.shape[0]
+            rez.total=rez.Z*(ntrain/ntest)-rez.alpha_kls-rez.U_kls*(ntrain/ntest)
+            rez.loss=-rez.total
+            self.test_elbos.append(rez)
+            self.test_elbo_iter_loc.append(len(self.elbos)-1)
+            # if len(self.test_elbos)>2 and self.test_elbos[-2].loss < self.test_elbos[-1].loss:
+            #     raise Exception("test loss going up!")
+
+    def go(self,niter,U=True,alpha=True,kappalams=True,testcheck_every=None):
         self.KEEPGOING=True
+
+        if testcheck_every is None:
+            testcheck_every=niter*2 # never checks
+        else:
+            assert self.testingdata is not None
+
         t=tqdm.tqdm_notebook(range(niter))
         for i in t:
             if U:
                 self.model.update_U(verbose=False)
-                if not self._eupdate():
-                    self.stop()
-                    return False
-                t.set_description("%e"%self.elbos[-1].loss)
-            
+                self._eupdate(t)
             if alpha:
                 self.model.update_alpha(verbose=False)
-                if not self._eupdate():
-                    self.stop()
-                    return False
-                t.set_description("%e"%self.elbos[-1].loss) 
-        
+                self._eupdate(t)
             if kappalams:
                 self.model.update_kappas_and_lambdas()
-                if not self._eupdate():
-                    self.stop()
-                    return False
-                t.set_description("%e"%self.elbos[-1].loss) 
+                self._eupdate(t)
+
+            if (i+1)%testcheck_every ==0 :
+                self.testcheck()
 
             if not self.KEEPGOING:
                 return
+
         
 
 class PoisModel:
@@ -211,7 +266,7 @@ class PoisModel:
 
     def double(self):
         self.dtype=torch.double
-        for x in ['kappas','lambdas','sU','rU','salpha','ralpha','rho','vals']:
+        for x in ['kappas','lambdas','sU','rU','salpha','ralpha','rhoU','rhoalpha','vals']:
             setattr(self,x,getattr(self,x).double())
         self.update_uai()
 
@@ -234,21 +289,49 @@ class PoisModel:
         self.uai.Ealpha = self.salpha/self.ralpha
         self.uai.ELalpha = torch.digamma(self.salpha)-torch.log(self.ralpha)        
 
+    def update_kappas(self):
+        self.kappas = self.rhoU /torch.mean(self.uai.EU,1)
+    def update_lambdas(self):
+        self.lambdas= self.rhoalpha /torch.mean(self.uai.Ealpha,1)
     def update_kappas_and_lambdas(self):
         self.kappas = self.rhoU /torch.mean(self.uai.EU,1)
         self.lambdas= self.rhoalpha /torch.mean(self.uai.Ealpha,1)
 
-    def initialize_with_known_alpha(self,salpha,ralpha,device='cpu'):
-        mn = len(self.cells) / (self.Nc*alpha.shape[1])
-        avg = np.sqrt(mn / alpha.shape[1])
+    def initialize_with_known_alpha(self,salpha,ralpha,device='cpu',verbose=True):
+        mn = np.mean(self.countmatrix)        
+        avg = np.sqrt(mn / self.Nk)
 
-        self.sU=torch.full_like(alpha,avg,shape=(self.Nc,self.Nk),device=device)
-        self.rU=torch.ones_like(alpha, shape=(self.Nc,self.Nk), device=device)
         self.salpha=torch.tensor(salpha,dtype=self.dtype,device=device)
         self.ralpha=torch.tensor(ralpha,dtype=self.dtype,device=device)
+        self.sU=torch.full((self.Nc,self.Nk),avg,dtype=self.dtype)
+        self.rU=torch.ones_like(self.sU, device=device)
         
         self.update_uai()
         self.update_kappas_and_lambdas()
+
+    def initialize_with_known_U(self,sU,rU,device='cpu',verbose=True):
+        mn = np.mean(self.countmatrix)
+        avg = np.sqrt(mn / self.Nk)
+
+        self.sU=torch.tensor(sU,dtype=self.dtype,device=device)
+        self.rU=torch.tensor(rU,dtype=self.dtype,device=device)
+        self.salpha=torch.full((self.Nt,self.Nk),avg,dtype=self.dtype)
+        self.ralpha=torch.ones_like(self.salpha, device=device)
+        
+        self.update_uai()
+        self.update_kappas_and_lambdas()
+
+    def initialize_randomly(self,device='cpu',certainty=10,startwith='U',verbose=True):
+        if startwith=='U':
+            cellsums=np.array(np.mean(self.countmatrix,axis=1))
+            mns=npr.rand(self.Nc,self.Nk)
+            mns=np.sqrt(cellsums)*mns/np.sum(mns,axis=1,keepdims=True)
+            self.initialize_with_known_U(certainty+0*mns,certainty/mns,verbose=verbose)
+        else:            
+            cellsums=np.array(np.mean(self.countmatrix,axis=0))
+            mns=npr.rand(self.Nt,self.Nk)
+            mns=np.sqrt(cellsums)*mns/np.sum(mns,axis=1,keepdims=True)
+            self.initialize_with_known_alpha(certainty+0*mns,certainty/mns,verbose=verbose)
 
     def initialize(self,device='cpu',certainty=10):
         U,alpha=sklearn.decomposition.nmf._initialize_nmf(self.countmatrix.tocsr(),self.Nk)
@@ -263,14 +346,5 @@ class PoisModel:
         self.salpha=certainty*torch.tensor(alpha,dtype=self.dtype,device=device)
         self.ralpha=certainty*torch.ones_like(self.salpha)
         
-        self.update_uai()
-        self.update_kappas_and_lambdas()
-
-    def initialize_shitty(self,device='cpu'):
-        self.sU=torch.rand((self.Nc,self.Nk),dtype=self.dtype,device=device)
-        self.rU=torch.ones_like(self.sU)
-        self.salpha=torch.rand((self.Nt,self.Nk),dtype=self.dtype,device=device)
-        self.ralpha=torch.ones_like(self.salpha)
-
         self.update_uai()
         self.update_kappas_and_lambdas()
